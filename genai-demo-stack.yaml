@@ -1,0 +1,309 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Main CloudFormation template for Multi-Channel GenAI Demo with nested OpenSearch stack and Secrets Manager'
+
+Parameters:
+  CdkAppName:
+    Type: String
+    Default: 'MultiChannelGenAIDemo'
+  WhatsappSNSTopicArn:
+    Type: String
+    Description: 'The ARN of the WhatsApp SNS topic'
+  FoundationModelARN:
+    Type: String
+    Description: 'The ARN of the Bedrock foundation model'
+
+Resources:
+  MessagingSecrets:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Name: !Sub '/${CdkAppName}/messaging-secrets'
+      Description: 'Secrets for SMS and WhatsApp origination numbers'
+      GenerateSecretString:
+        SecretStringTemplate: '{"OriginationNumberId":"", "WhatsappOriginationNumberId":""}'
+        GenerateStringKey: 'dummy'
+        ExcludeCharacters: '"@/\'
+
+  AccessLogsBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      ObjectOwnership: BucketOwnerPreferred
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  DocsBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      LifecycleConfiguration:
+        Rules:
+          - ExpirationInDays: 10
+            Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AccessLogsBucket
+        LogFilePrefix: 'kbdocs'
+
+  OpenSearchStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 
+        - 'https://${AWS::Region}-${AWS::AccountId}.s3.${AWS::Region}.${AWS::URLSuffix}/${BucketKey}'
+        - BucketKey: !Ref OpenSearchTemplateKey
+      Parameters:
+        CdkAppName: !Ref CdkAppName
+
+  OpenSearchTemplate:
+    Type: AWS::S3::Object
+    Properties:
+      Bucket: !Sub '${AWS::Region}-${AWS::AccountId}'
+      Key: !Ref OpenSearchTemplateKey
+      Content: !Sub |
+        AWSTemplateFormatVersion: '2010-09-09'
+        Description: 'Nested stack for OpenSearch Serverless'
+
+        Parameters:
+          CdkAppName:
+            Type: String
+            Description: 'The name of the CDK app'
+
+        Resources:
+          OpenSearchCollection:
+            Type: AWS::OpenSearchServerless::Collection
+            Properties:
+              Name: !Sub '$${CdkAppName}-collection'
+              Description: 'Vector store for knowledge base'
+              Type: 'VECTOR_SEARCH'
+
+        Outputs:
+          OpenSearchCollectionArn:
+            Description: 'ARN of the OpenSearch Serverless Collection'
+            Value: !GetAtt OpenSearchCollection.Arn
+
+  OpenSearchTemplateKey:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${CdkAppName}/OpenSearchTemplateKey'
+      Type: String
+      Value: !Sub '${CdkAppName}-opensearch-template.yaml'
+
+  KnowledgeBase:
+    Type: 'AWS::Bedrock::KnowledgeBase'
+    Properties:
+      Name: !Sub '${CdkAppName}-KnowledgeBase'
+      Description: 'Knowledge base for Multi-Channel GenAI Demo'
+      EmbeddingsModel: 'aws.embeddings.titan.e1.1024'
+      VectorStoreConfiguration:
+        VectorStoreType: 'OPENSEARCH_SERVERLESS'
+        Arn: !GetAtt OpenSearchStack.Outputs.OpenSearchCollectionArn
+
+  S3DataSource:
+    Type: 'AWS::Bedrock::DataSource'
+    Properties:
+      Name: 'docs'
+      KnowledgeBaseId: !Ref KnowledgeBase
+      DataSourceConfiguration:
+        S3Configuration:
+          BucketArn: !GetAtt DocsBucket.Arn
+      ChunkingConfiguration:
+        ChunkingStrategy: 'FIXED_SIZE'
+        MaxTokens: 500
+        OverlapPercentage: 20
+
+  ChatTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      DisplayName: !Sub '${CdkAppName}-NotificationTopic'
+      KmsMasterKeyId: 'alias/aws/sns'
+
+  SNSRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 'sms-voice.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: SNSPublishPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'sns:Publish'
+                Resource: !Ref ChatTopic
+
+  ChatProcessorLambdaLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      RetentionInDays: 90
+
+  ChatProcessorLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub '${CdkAppName}-ChatProcessor'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import boto3
+
+          service_name = 'bedrock-agent-runtime'
+          client = boto3.client(service_name)
+          secrets_manager = boto3.client('secretsmanager')
+
+          knowledgeBaseID = os.environ['KNOWLEDGE_BASE_ID']
+          fundation_model_ARN = os.environ['FM_ARN']
+          secrets_arn = os.environ['SECRETS_ARN']
+
+          def get_secrets():
+              secret = secrets_manager.get_secret_value(SecretId=secrets_arn)
+              return json.loads(secret['SecretString'])
+
+          def lambda_handler(event, context):
+              secrets = get_secrets()
+              user_query = event['query']
+              
+              client_knowledgebase = client.retrieve_and_generate(
+                  input={
+                      'text': user_query
+                  },
+                  retrieveAndGenerateConfiguration={
+                      'type': 'KNOWLEDGE_BASE',
+                      'knowledgeBaseConfiguration': {
+                          'knowledgeBaseId': knowledgeBaseID,
+                          'modelArn': fundation_model_ARN
+                      }
+                  }
+              )
+              
+              print("----------- Reference Details -------------")
+
+              citations = client_knowledgebase['citations']
+              reference = citations[0]['retrievedReferences'][0]
+
+              s3_location = reference['location']['s3Location']['uri']
+
+              generated_response = client_knowledgebase['output']['text']
+
+              final_result = {
+                  'statusCode': 200,
+                  'query': user_query,
+                  'generated_response': generated_response,
+                  's3_location': s3_location,
+                  'origination_number_id': secrets['OriginationNumberId'],
+                  'whatsapp_origination_number_id': secrets['WhatsappOriginationNumberId']
+              }
+              
+              print("Result details:\n", final_result)
+              
+              return final_result
+      Timeout: 30
+      MemorySize: 512
+      Environment:
+        Variables:
+          KNOWLEDGE_BASE_ID: !Ref KnowledgeBase
+          FM_ARN: !Ref FoundationModelARN
+          SECRETS_ARN: !Ref MessagingSecrets
+      Role: !GetAtt ChatProcessorLambdaRole.Arn
+
+  ChatProcessorLambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: ChatProcessorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'social-messaging:DeleteWhatsAppMessageMedia'
+                  - 'social-messaging:SendWhatsAppMessage'
+                  - 'social-messaging:PostWhatsAppMessageMedia'
+                  - 'social-messaging:GetWhatsAppMessageMedia'
+                Resource: !Sub 'arn:aws:social-messaging:${AWS::Region}:${AWS::AccountId}:phone-number-id/*'
+              - Effect: Allow
+                Action:
+                  - 'sms-voice:SendTextMessage'
+                  - 'sms-voice:SendMediaMessage'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'bedrock:InvokeModel'
+                  - 'bedrock:Retrieve'
+                  - 'bedrock:RetrieveAndGenerate'
+                Resource: 
+                  - !Ref FoundationModelARN
+                  - !GetAtt KnowledgeBase.Arn
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource: !Ref MessagingSecrets
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: 'arn:aws:logs:*:*:*'
+
+  ChatTopicSubscription:
+    Type: 'AWS::SNS::Subscription'
+    Properties:
+      TopicArn: !Ref ChatTopic
+      Protocol: lambda
+      Endpoint: !GetAtt ChatProcessorLambda.Arn
+
+  WhatsappTopicSubscription:
+    Type: 'AWS::SNS::Subscription'
+    Condition: WhatsappEnabled
+    Properties:
+      TopicArn: !Ref WhatsappSNSTopicArn
+      Protocol: lambda
+      Endpoint: !GetAtt ChatProcessorLambda.Arn
+
+Outputs:
+  ChatProcessorLambdaName:
+    Value: !Ref ChatProcessorLambda
+  ChatProcessorLambdaARN:
+    Value: !GetAtt ChatProcessorLambda.Arn
+  DocsBucketName:
+    Value: !Ref DocsBucket
+  KnowledgeBaseName:
+    Value: !GetAtt KnowledgeBase.Name
+  DataSourceName:
+    Value: !GetAtt S3DataSource.Name
+  OpenSearchCollectionArn:
+    Value: !GetAtt OpenSearchStack.Outputs.OpenSearchCollectionArn
+  MessagingSecretsARN:
+    Value: !Ref MessagingSecrets
+  ChatTopicARN:
+    Value: !Ref ChatTopic
+
+Conditions:
+  WhatsappEnabled: !Not [!Equals [!Ref WhatsappSNSTopicArn, '']]
