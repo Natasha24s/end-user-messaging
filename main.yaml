@@ -1,0 +1,207 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Main CloudFormation template for Multi-Channel GenAI Demo'
+
+Parameters:
+  CdkAppName:
+    Type: String
+    Default: 'MultiChannelGenAIDemo'
+  OpenSearchStackTemplateURL:
+    Type: String
+    Description: 'S3 URL for the OpenSearch stack template'
+  RAGStackTemplateURL:
+    Type: String
+    Description: 'S3 URL for the RAG stack template'
+
+Resources:
+  OpenSearchStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Ref OpenSearchStackTemplateURL
+      Parameters:
+        CdkAppName: !Ref CdkAppName
+
+  RAGStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Ref RAGStackTemplateURL
+      Parameters:
+        CdkAppName: !Ref CdkAppName
+        CollectionArn: !GetAtt OpenSearchStack.Outputs.OpenSearchCollectionArn
+
+  MessagingSecrets:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Name: !Sub '/${CdkAppName}/messaging-secrets'
+      Description: 'Secrets for SMS and WhatsApp origination numbers'
+      GenerateSecretString:
+        SecretStringTemplate: '{"OriginationNumberId":"", "WhatsappOriginationNumberId":""}'
+        GenerateStringKey: 'dummy'
+        ExcludeCharacters: '"@/\'
+
+  ChatTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub '${CdkAppName}-NotificationTopic'
+      KmsMasterKeyId: 'alias/aws/sns'
+
+  WhatsAppChatTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub '${CdkAppName}-WhatsAppNotificationTopic'
+      KmsMasterKeyId: 'alias/aws/sns'
+
+  SNSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 'sms-voice.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: SNSPublishPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'sns:Publish'
+                Resource: 
+                  - !Ref ChatTopic
+                  - !Ref WhatsAppChatTopic
+
+  ChatProcessorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${CdkAppName}-ChatProcessor'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import boto3
+
+          service_name = 'bedrock-agent-runtime'
+          client = boto3.client(service_name)
+
+          knowledgeBaseID = os.environ['KNOWLEDGE_BASE_ID']
+          foundation_model_ARN = os.environ['FM_ARN']
+
+          def lambda_handler(event, context):
+              user_query = event['query']
+              
+              client_knowledgebase = client.retrieve_and_generate(
+                  input={
+                      'text': user_query
+                  },
+                  retrieveAndGenerateConfiguration={
+                      'type': 'KNOWLEDGE_BASE',
+                      'knowledgeBaseConfiguration': {
+                          'knowledgeBaseId': knowledgeBaseID,
+                          'modelArn': foundation_model_ARN
+                      }
+                  }
+              )
+              
+              print("----------- Reference Details -------------")
+
+              citations = client_knowledgebase['citations']
+              reference = citations[0]['retrievedReferences'][0]
+
+              s3_location = reference['location']['s3Location']['uri']
+
+              generated_response = client_knowledgebase['output']['text']
+
+              final_result = {
+                  'statusCode': 200,
+                  'query': user_query,
+                  'generated_response': generated_response,
+                  's3_location': s3_location
+              }
+              
+              print("Result details:\n", final_result)
+              
+              return final_result
+      Timeout: 30
+      MemorySize: 512
+      Environment:
+        Variables:
+          KNOWLEDGE_BASE_ID: !GetAtt RAGStack.Outputs.KnowledgeBaseId
+          FM_ARN: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-v2'
+      Role: !GetAtt ChatProcessorLambdaRole.Arn
+
+  ChatProcessorLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: ChatProcessorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'social-messaging:DeleteWhatsAppMessageMedia'
+                  - 'social-messaging:SendWhatsAppMessage'
+                  - 'social-messaging:PostWhatsAppMessageMedia'
+                  - 'social-messaging:GetWhatsAppMessageMedia'
+                Resource: !Sub 'arn:aws:social-messaging:${AWS::Region}:${AWS::AccountId}:phone-number-id/*'
+              - Effect: Allow
+                Action:
+                  - 'sms-voice:SendTextMessage'
+                  - 'sms-voice:SendMediaMessage'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'bedrock:InvokeModel'
+                  - 'bedrock:Retrieve'
+                  - 'bedrock:RetrieveAndGenerate'
+                Resource: 
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-v2'
+                  - !GetAtt RAGStack.Outputs.KnowledgeBaseArn
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: 'arn:aws:logs:*:*:*'
+
+  ChatTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref ChatTopic
+      Protocol: lambda
+      Endpoint: !GetAtt ChatProcessorLambda.Arn
+
+  WhatsAppChatTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref WhatsAppChatTopic
+      Protocol: lambda
+      Endpoint: !GetAtt ChatProcessorLambda.Arn
+
+Outputs:
+  ChatProcessorLambdaName:
+    Value: !Ref ChatProcessorLambda
+  ChatProcessorLambdaARN:
+    Value: !GetAtt ChatProcessorLambda.Arn
+  MessagingSecretsARN:
+    Value: !Ref MessagingSecrets
+  ChatTopicARN:
+    Value: !Ref ChatTopic
+  WhatsAppChatTopicARN:
+    Value: !Ref WhatsAppChatTopic
+  KnowledgeBaseId:
+    Value: !GetAtt RAGStack.Outputs.KnowledgeBaseId
+  KnowledgeBaseArn:
+    Value: !GetAtt RAGStack.Outputs.KnowledgeBaseArn
+  OpenSearchCollectionArn:
+    Value: !GetAtt OpenSearchStack.Outputs.OpenSearchCollectionArn
