@@ -5,9 +5,6 @@ Parameters:
   CdkAppName:
     Type: String
     Default: 'MultiChannelGenAIDemo'
-  FoundationModelARN:
-    Type: String
-    Description: 'The ARN of the Bedrock foundation model'
 
 Resources:
   MessagingSecrets:
@@ -23,7 +20,6 @@ Resources:
   AccessLogsBucket:
     Type: 'AWS::S3::Bucket'
     Properties:
-      ObjectOwnership: BucketOwnerPreferred
       VersioningConfiguration:
         Status: Enabled
       BucketEncryption:
@@ -81,43 +77,86 @@ Resources:
       Parameters:
         CdkAppName: !Ref CdkAppName
 
+  KnowledgeBaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: KnowledgeBaseAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::${DocsBucket}
+                  - !Sub arn:aws:s3:::${DocsBucket}/*
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource: !GetAtt OpenSearchStack.Outputs.OpenSearchCollectionArn
+
   KnowledgeBase:
-    Type: 'AWS::Bedrock::KnowledgeBase'
+    Type: AWS::Bedrock::KnowledgeBase
     Properties:
       Name: !Sub '${CdkAppName}-KnowledgeBase'
       Description: 'Knowledge base for Multi-Channel GenAI Demo'
-      EmbeddingsModel: 'aws.embeddings.titan.e1.1024'
-      VectorStoreConfiguration:
-        VectorStoreType: 'OPENSEARCH_SERVERLESS'
-        Arn: !GetAtt OpenSearchStack.Outputs.OpenSearchCollectionArn
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v1'
+      RoleArn: !GetAtt KnowledgeBaseRole.Arn
+      StorageConfiguration:
+        Type: OPENSEARCH_SERVERLESS
+        OpensearchServerlessConfiguration:
+          CollectionArn: !GetAtt OpenSearchStack.Outputs.OpenSearchCollectionArn
+          FieldMapping:
+            MetadataField: AMAZON_BEDROCK_METADATA
+            TextField: AMAZON_BEDROCK_TEXT_CHUNK
+            VectorField: bedrock-knowledge-base-default-vector
+          VectorIndexName: !Sub '${CdkAppName}-vector-index'
 
-  S3DataSource:
-    Type: 'AWS::Bedrock::DataSource'
+  KnowledgeBaseDataSource:
+    Type: AWS::Bedrock::DataSource
+    DependsOn:
+      - KnowledgeBase
     Properties:
-      Name: 'docs'
-      KnowledgeBaseId: !Ref KnowledgeBase
       DataSourceConfiguration:
+        Type: S3
         S3Configuration:
           BucketArn: !GetAtt DocsBucket.Arn
-      ChunkingConfiguration:
-        ChunkingStrategy: 'FIXED_SIZE'
-        MaxTokens: 500
-        OverlapPercentage: 20
+      Description: Knowledge Base Data Source
+      KnowledgeBaseId: !Ref KnowledgeBase
+      Name: !Sub '${CdkAppName}-DataSource'
+      VectorIngestionConfiguration:
+        ChunkingConfiguration:
+          ChunkingStrategy: FIXED_SIZE
+          FixedSizeChunkingConfiguration:
+            MaxTokens: 300
+            OverlapPercentage: 20
 
   ChatTopic:
-    Type: 'AWS::SNS::Topic'
+    Type: AWS::SNS::Topic
     Properties:
       DisplayName: !Sub '${CdkAppName}-NotificationTopic'
       KmsMasterKeyId: 'alias/aws/sns'
 
   WhatsAppChatTopic:
-    Type: 'AWS::SNS::Topic'
+    Type: AWS::SNS::Topic
     Properties:
       DisplayName: !Sub '${CdkAppName}-WhatsAppNotificationTopic'
       KmsMasterKeyId: 'alias/aws/sns'
 
   SNSRole:
-    Type: 'AWS::IAM::Role'
+    Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -138,12 +177,12 @@ Resources:
                   - !Ref WhatsAppChatTopic
 
   ChatProcessorLambdaLogGroup:
-    Type: 'AWS::Logs::LogGroup'
+    Type: AWS::Logs::LogGroup
     Properties:
       RetentionInDays: 90
 
   ChatProcessorLambda:
-    Type: 'AWS::Lambda::Function'
+    Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub '${CdkAppName}-ChatProcessor'
       Runtime: python3.9
@@ -158,7 +197,7 @@ Resources:
           client = boto3.client(service_name)
 
           knowledgeBaseID = os.environ['KNOWLEDGE_BASE_ID']
-          fundation_model_ARN = os.environ['FM_ARN']
+          foundation_model_ARN = os.environ['FM_ARN']
 
           def lambda_handler(event, context):
               user_query = event['query']
@@ -171,7 +210,7 @@ Resources:
                       'type': 'KNOWLEDGE_BASE',
                       'knowledgeBaseConfiguration': {
                           'knowledgeBaseId': knowledgeBaseID,
-                          'modelArn': fundation_model_ARN
+                          'modelArn': foundation_model_ARN
                       }
                   }
               )
@@ -200,11 +239,11 @@ Resources:
       Environment:
         Variables:
           KNOWLEDGE_BASE_ID: !Ref KnowledgeBase
-          FM_ARN: !Ref FoundationModelARN
+          FM_ARN: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-v2'
       Role: !GetAtt ChatProcessorLambdaRole.Arn
 
   ChatProcessorLambdaRole:
-    Type: 'AWS::IAM::Role'
+    Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -236,7 +275,7 @@ Resources:
                   - 'bedrock:Retrieve'
                   - 'bedrock:RetrieveAndGenerate'
                 Resource: 
-                  - !Ref FoundationModelARN
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-v2'
                   - !GetAtt KnowledgeBase.Arn
               - Effect: Allow
                 Action:
@@ -246,14 +285,14 @@ Resources:
                 Resource: 'arn:aws:logs:*:*:*'
 
   ChatTopicSubscription:
-    Type: 'AWS::SNS::Subscription'
+    Type: AWS::SNS::Subscription
     Properties:
       TopicArn: !Ref ChatTopic
       Protocol: lambda
       Endpoint: !GetAtt ChatProcessorLambda.Arn
 
   WhatsAppChatTopicSubscription:
-    Type: 'AWS::SNS::Subscription'
+    Type: AWS::SNS::Subscription
     Properties:
       TopicArn: !Ref WhatsAppChatTopic
       Protocol: lambda
@@ -267,9 +306,9 @@ Outputs:
   DocsBucketName:
     Value: !Ref DocsBucket
   KnowledgeBaseName:
-    Value: !GetAtt KnowledgeBase.Name
+    Value: !Ref KnowledgeBase
   DataSourceName:
-    Value: !GetAtt S3DataSource.Name
+    Value: !Ref KnowledgeBaseDataSource
   OpenSearchCollectionArn:
     Value: !GetAtt OpenSearchStack.Outputs.OpenSearchCollectionArn
   MessagingSecretsARN:
