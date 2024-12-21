@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Nested stack for RAG using Bedrock Knowledge Base'
+
+Parameters:
+  CdkAppName:
+    Type: String
+    Description: 'The name of the CDK app'
+  CollectionArn:
+    Type: String
+    Description: 'ARN of the OpenSearch Serverless Collection'
+
+Resources:
+  DocsBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      LifecycleConfiguration:
+        Rules:
+          - ExpirationInDays: 10
+            Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  KnowledgeBaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: KnowledgeBaseAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::${DocsBucket}
+                  - !Sub arn:aws:s3:::${DocsBucket}/*
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource: !Ref CollectionArn
+
+  KnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    Properties:
+      Name: !Sub '${CdkAppName}-KnowledgeBase'
+      Description: 'Knowledge base for Multi-Channel GenAI Demo'
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v1'
+      RoleArn: !GetAtt KnowledgeBaseRole.Arn
+      StorageConfiguration:
+        Type: OPENSEARCH_SERVERLESS
+        OpensearchServerlessConfiguration:
+          CollectionArn: !Ref CollectionArn
+          FieldMapping:
+            MetadataField: AMAZON_BEDROCK_METADATA
+            TextField: AMAZON_BEDROCK_TEXT_CHUNK
+            VectorField: bedrock-knowledge-base-default-vector
+          VectorIndexName: !Sub '${CdkAppName}-vector-index'
+
+  KnowledgeBaseDataSource:
+    Type: AWS::Bedrock::DataSource
+    DependsOn:
+      - KnowledgeBase
+    Properties:
+      DataSourceConfiguration:
+        Type: S3
+        S3Configuration:
+          BucketArn: !GetAtt DocsBucket.Arn
+      Description: Knowledge Base Data Source
+      KnowledgeBaseId: !Ref KnowledgeBase
+      Name: !Sub '${CdkAppName}-DataSource'
+      VectorIngestionConfiguration:
+        ChunkingConfiguration:
+          ChunkingStrategy: FIXED_SIZE
+          FixedSizeChunkingConfiguration:
+            MaxTokens: 300
+            OverlapPercentage: 20
+
+Outputs:
+  KnowledgeBaseId:
+    Description: 'ID of the Bedrock Knowledge Base'
+    Value: !Ref KnowledgeBase
+  KnowledgeBaseArn:
+    Description: 'ARN of the Bedrock Knowledge Base'
+    Value: !GetAtt KnowledgeBase.Arn
+  DocsBucketName:
+    Description: 'Name of the S3 bucket for documents'
+    Value: !Ref DocsBucket
+  DataSourceName:
+    Description: 'Name of the Bedrock Data Source'
+    Value: !Ref KnowledgeBaseDataSource
