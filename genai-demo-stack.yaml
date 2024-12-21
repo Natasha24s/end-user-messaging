@@ -59,45 +59,27 @@ Resources:
   OpenSearchStack:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: !Sub 
-        - 'https://${AWS::Region}-${AWS::AccountId}.s3.${AWS::Region}.${AWS::URLSuffix}/${BucketKey}'
-        - BucketKey: !Ref OpenSearchTemplateKey
+      TemplateBody: 
+        !Sub 
+          - |
+            AWSTemplateFormatVersion: '2010-09-09'
+            Description: 'Nested stack for OpenSearch Serverless'
+
+            Resources:
+              OpenSearchCollection:
+                Type: AWS::OpenSearchServerless::Collection
+                Properties:
+                  Name: ${CdkAppName}-collection
+                  Description: 'Vector store for knowledge base'
+                  Type: 'VECTOR_SEARCH'
+
+            Outputs:
+              OpenSearchCollectionArn:
+                Description: 'ARN of the OpenSearch Serverless Collection'
+                Value: !GetAtt OpenSearchCollection.Arn
+          - CdkAppName: !Ref CdkAppName
       Parameters:
         CdkAppName: !Ref CdkAppName
-
-  OpenSearchTemplate:
-    Type: AWS::S3::Object
-    Properties:
-      Bucket: !Sub '${AWS::Region}-${AWS::AccountId}'
-      Key: !Ref OpenSearchTemplateKey
-      Content: !Sub |
-        AWSTemplateFormatVersion: '2010-09-09'
-        Description: 'Nested stack for OpenSearch Serverless'
-
-        Parameters:
-          CdkAppName:
-            Type: String
-            Description: 'The name of the CDK app'
-
-        Resources:
-          OpenSearchCollection:
-            Type: AWS::OpenSearchServerless::Collection
-            Properties:
-              Name: !Sub '$${CdkAppName}-collection'
-              Description: 'Vector store for knowledge base'
-              Type: 'VECTOR_SEARCH'
-
-        Outputs:
-          OpenSearchCollectionArn:
-            Description: 'ARN of the OpenSearch Serverless Collection'
-            Value: !GetAtt OpenSearchCollection.Arn
-
-  OpenSearchTemplateKey:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: !Sub '/${CdkAppName}/OpenSearchTemplateKey'
-      Type: String
-      Value: !Sub '${CdkAppName}-opensearch-template.yaml'
 
   KnowledgeBase:
     Type: 'AWS::Bedrock::KnowledgeBase'
