@@ -21,7 +21,7 @@ Parameters:
   pKbRoleArn:
     Type: String
     Description: KB role Arn for e2e RAG
-    Default: !Sub 'arn:aws:iam::${AWS::AccountId}:role/KnowledgeBaseRole'
+    Default: ''  # This will be set in the main stack
 
 Resources:
   EncryptionPolicy:
