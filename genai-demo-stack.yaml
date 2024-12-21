@@ -5,9 +5,6 @@ Parameters:
   CdkAppName:
     Type: String
     Default: 'MultiChannelGenAIDemo'
-  WhatsappSNSTopicArn:
-    Type: String
-    Description: 'The ARN of the WhatsApp SNS topic'
   FoundationModelARN:
     Type: String
     Description: 'The ARN of the Bedrock foundation model'
@@ -131,6 +128,12 @@ Resources:
       DisplayName: !Sub '${CdkAppName}-NotificationTopic'
       KmsMasterKeyId: 'alias/aws/sns'
 
+  WhatsAppChatTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      DisplayName: !Sub '${CdkAppName}-WhatsAppNotificationTopic'
+      KmsMasterKeyId: 'alias/aws/sns'
+
   SNSRole:
     Type: 'AWS::IAM::Role'
     Properties:
@@ -148,7 +151,9 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: 'sns:Publish'
-                Resource: !Ref ChatTopic
+                Resource: 
+                  - !Ref ChatTopic
+                  - !Ref WhatsAppChatTopic
 
   ChatProcessorLambdaLogGroup:
     Type: 'AWS::Logs::LogGroup'
@@ -169,18 +174,11 @@ Resources:
 
           service_name = 'bedrock-agent-runtime'
           client = boto3.client(service_name)
-          secrets_manager = boto3.client('secretsmanager')
 
           knowledgeBaseID = os.environ['KNOWLEDGE_BASE_ID']
           fundation_model_ARN = os.environ['FM_ARN']
-          secrets_arn = os.environ['SECRETS_ARN']
-
-          def get_secrets():
-              secret = secrets_manager.get_secret_value(SecretId=secrets_arn)
-              return json.loads(secret['SecretString'])
 
           def lambda_handler(event, context):
-              secrets = get_secrets()
               user_query = event['query']
               
               client_knowledgebase = client.retrieve_and_generate(
@@ -209,9 +207,7 @@ Resources:
                   'statusCode': 200,
                   'query': user_query,
                   'generated_response': generated_response,
-                  's3_location': s3_location,
-                  'origination_number_id': secrets['OriginationNumberId'],
-                  'whatsapp_origination_number_id': secrets['WhatsappOriginationNumberId']
+                  's3_location': s3_location
               }
               
               print("Result details:\n", final_result)
@@ -223,7 +219,6 @@ Resources:
         Variables:
           KNOWLEDGE_BASE_ID: !Ref KnowledgeBase
           FM_ARN: !Ref FoundationModelARN
-          SECRETS_ARN: !Ref MessagingSecrets
       Role: !GetAtt ChatProcessorLambdaRole.Arn
 
   ChatProcessorLambdaRole:
@@ -263,10 +258,6 @@ Resources:
                   - !GetAtt KnowledgeBase.Arn
               - Effect: Allow
                 Action:
-                  - 'secretsmanager:GetSecretValue'
-                Resource: !Ref MessagingSecrets
-              - Effect: Allow
-                Action:
                   - 'logs:CreateLogGroup'
                   - 'logs:CreateLogStream'
                   - 'logs:PutLogEvents'
@@ -279,11 +270,10 @@ Resources:
       Protocol: lambda
       Endpoint: !GetAtt ChatProcessorLambda.Arn
 
-  WhatsappTopicSubscription:
+  WhatsAppChatTopicSubscription:
     Type: 'AWS::SNS::Subscription'
-    Condition: WhatsappEnabled
     Properties:
-      TopicArn: !Ref WhatsappSNSTopicArn
+      TopicArn: !Ref WhatsAppChatTopic
       Protocol: lambda
       Endpoint: !GetAtt ChatProcessorLambda.Arn
 
@@ -304,6 +294,5 @@ Outputs:
     Value: !Ref MessagingSecrets
   ChatTopicARN:
     Value: !Ref ChatTopic
-
-Conditions:
-  WhatsappEnabled: !Not [!Equals [!Ref WhatsappSNSTopicArn, '']]
+  WhatsAppChatTopicARN:
+    Value: !Ref WhatsAppChatTopic
