@@ -21,13 +21,13 @@ Parameters:
   pKbRoleArn:
     Type: String
     Description: KB role Arn for e2e RAG
-    Default: ''  # This will be set in the main stack
+    Default: ''
 
 Resources:
   EncryptionPolicy:
     Type: AWS::OpenSearchServerless::SecurityPolicy
     Properties:
-      Name: !Sub ${Q08pCollectionName}-enc
+      Name: !Sub '${Q08pCollectionName}-enc'
       Policy: !Sub '{"Rules": [{"ResourceType": "collection", "Resource": ["collection/${Q08pCollectionName}"]}], "AWSOwnedKey": true}'
       Type: encryption
 
@@ -36,7 +36,7 @@ Resources:
     DependsOn:
     - EncryptionPolicy
     Properties:
-      Name: !Sub ${Q08pCollectionName}-net
+      Name: !Sub '${Q08pCollectionName}-net'
       Policy: !Sub '[{"Description": "Public access for ${Q08pCollectionName} collection", "Rules": [{"ResourceType": "dashboard", "Resource": ["collection/${Q08pCollectionName}"]}, {"ResourceType": "collection", "Resource": ["collection/${Q08pCollectionName}"]}], "AllowFromPublic": true}]'
       Type: network
 
@@ -45,7 +45,7 @@ Resources:
     DependsOn:
     - NetworkPolicy
     Properties:
-      Name: !Sub ${Q08pCollectionName}-access
+      Name: !Sub '${Q08pCollectionName}-access'
       Policy: !Sub '[{"Rules": [{"Resource": ["collection/${Q08pCollectionName}"], "Permission": ["aoss:CreateCollectionItems", "aoss:UpdateCollectionItems", "aoss:DescribeCollectionItems"], "ResourceType": "collection"}, {"ResourceType": "index", "Resource": ["index/${Q08pCollectionName}/*"], "Permission": ["aoss:CreateIndex", "aoss:DescribeIndex", "aoss:ReadDocument", "aoss:WriteDocument", "aoss:UpdateIndex", "aoss:DeleteIndex"]}], "Principal": ["${pKbRoleArn}"]}]'
       Type: data
 
