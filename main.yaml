@@ -2,9 +2,10 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: 'Main CloudFormation template for Multi-Channel GenAI Demo'
 
 Parameters:
-  CdkAppName:
+  AppName:
     Type: String
     Default: 'MultiChannelGenAIDemo'
+    Description: 'Name of the application, used as a prefix for resource names'
   OpenSearchStackTemplateURL:
     Type: String
     Description: 'S3 URL for the OpenSearch stack template'
@@ -33,8 +34,8 @@ Resources:
                   - s3:GetObject
                   - s3:ListBucket
                 Resource: 
-                  - !Sub 'arn:aws:s3:::${CdkAppName}-docs'
-                  - !Sub 'arn:aws:s3:::${CdkAppName}-docs/*'
+                  - !Sub 'arn:aws:s3:::${AppName}-docs'
+                  - !Sub 'arn:aws:s3:::${AppName}-docs/*'
               - Effect: Allow
                 Action:
                   - aoss:APIAccessAll
@@ -45,9 +46,8 @@ Resources:
     Properties:
       TemplateURL: !Ref OpenSearchStackTemplateURL
       Parameters:
-        CdkAppName: !Ref CdkAppName
-        Q08pCollectionName: !Sub '${CdkAppName}-collection'
-        Q09pIndexName: !Sub '${CdkAppName}-index'
+        Q08pCollectionName: !Sub '${AppName}-collection'
+        Q09pIndexName: !Sub '${AppName}-index'
         pKbRole: !Ref KnowledgeBaseRole
         pKbRoleArn: !GetAtt KnowledgeBaseRole.Arn
 
@@ -56,14 +56,14 @@ Resources:
     Properties:
       TemplateURL: !Ref RAGStackTemplateURL
       Parameters:
-        CdkAppName: !Ref CdkAppName
+        CdkAppName: !Ref AppName
         CollectionArn: !GetAtt OpenSearchStack.Outputs.CollectionArn
         KnowledgeBaseRoleArn: !GetAtt KnowledgeBaseRole.Arn
 
   MessagingSecrets:
     Type: 'AWS::SecretsManager::Secret'
     Properties:
-      Name: !Sub '/${CdkAppName}/messaging-secrets'
+      Name: !Sub '/${AppName}/messaging-secrets'
       Description: 'Secrets for SMS and WhatsApp origination numbers'
       GenerateSecretString:
         SecretStringTemplate: '{"OriginationNumberId":"", "WhatsappOriginationNumberId":""}'
@@ -73,13 +73,13 @@ Resources:
   ChatTopic:
     Type: AWS::SNS::Topic
     Properties:
-      DisplayName: !Sub '${CdkAppName}-NotificationTopic'
+      DisplayName: !Sub '${AppName}-NotificationTopic'
       KmsMasterKeyId: 'alias/aws/sns'
 
   WhatsAppChatTopic:
     Type: AWS::SNS::Topic
     Properties:
-      DisplayName: !Sub '${CdkAppName}-WhatsAppNotificationTopic'
+      DisplayName: !Sub '${AppName}-WhatsAppNotificationTopic'
       KmsMasterKeyId: 'alias/aws/sns'
 
   SNSRole:
@@ -106,7 +106,7 @@ Resources:
   ChatProcessorLambda:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub '${CdkAppName}-ChatProcessor'
+      FunctionName: !Sub '${AppName}-ChatProcessor'
       Runtime: python3.9
       Handler: index.lambda_handler
       Code:
