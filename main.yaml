@@ -46,7 +46,7 @@ Resources:
     Properties:
       TemplateURL: !Ref OpenSearchStackTemplateURL
       Parameters:
-        Q08pCollectionName: !Sub '${AppName}-collection'
+        Q08pCollectionName: !Sub '${AppName}-coll'
         Q09pIndexName: !Sub '${AppName}-index'
         pKbRole: !Ref KnowledgeBaseRole
         pKbRoleArn: !GetAtt KnowledgeBaseRole.Arn
